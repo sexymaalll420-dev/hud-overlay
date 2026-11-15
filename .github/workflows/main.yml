@@ -949,3 +949,8 @@ jobs:
                   if (Build.VERSION.SDK_INT >= 26) startForegroundService(i) else startService(i)
                   Toast.makeText(this, "HUD चालू — Free Fire खोलो", Toast.LENGTH_SHORT).show()
               }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: app-debug
+          path: app/build/outputs/apk/debug/app-debug.apk
+          
