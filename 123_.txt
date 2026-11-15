@@ -1,0 +1,951 @@
+name: build
+on:
+  workflow_dispatch:
+  push:
+
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: project files
+        run: |
+          mkdir -p app/src/main/java/com/venice/hud
+          mkdir -p app/src/main/aidl/com/venice/hud
+          mkdir -p app/src/main/res/xml
+          mkdir -p app/src/main/res/values
+
+          cat > settings.gradle.kts <<'XEOF'
+          pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal() } }
+          dependencyResolutionManagement { repositories { google(); mavenCentral() } }
+          rootProject.name = "HudOverlay"
+          include(":app")
+          XEOF
+
+          cat > build.gradle.kts <<'XEOF'
+          plugins {
+              id("com.android.application") version "8.5.2" apply false
+              id("org.jetbrains.kotlin.android") version "1.9.24" apply false
+          }
+          XEOF
+
+          cat > gradle.properties <<'XEOF'
+          android.useAndroidX=true
+          kotlin.code.style=official
+          org.gradle.jvmargs=-Xmx2g
+          XEOF
+
+          cat > app/build.gradle.kts <<'XEOF'
+          plugins {
+              id("com.android.application")
+              id("org.jetbrains.kotlin.android")
+          }
+
+          android {
+              namespace = "com.venice.hud"
+              compileSdk = 34
+
+              defaultConfig {
+                  applicationId = "com.venice.hud"
+                  minSdk = 24
+                  targetSdk = 34
+                  versionCode = 4
+                  versionName = "4.0"
+              }
+
+              buildFeatures { aidl = true }
+
+              compileOptions {
+                  sourceCompatibility = JavaVersion.VERSION_17
+                  targetCompatibility = JavaVersion.VERSION_17
+              }
+              kotlinOptions { jvmTarget = "17" }
+              buildTypes { release { isMinifyEnabled = false } }
+          }
+
+          dependencies {
+              implementation("dev.rikka.shizuku:api:13.1.5")
+              implementation("dev.rikka.shizuku:provider:13.1.5")
+          }
+          XEOF
+
+          cat > app/src/main/aidl/com/venice/hud/IInject.aidl <<'XEOF'
+          package com.venice.hud;
+
+          interface IInject {
+              boolean swipe(float x1, float y1, float x2, float y2, int ms);
+              boolean tap(float x, float y);
+              boolean snapHold(float cx, float cy, float tx, float ty, float fx, float fy, int ms);
+              boolean fireDown(float x, float y);
+              boolean fireUp(float x, float y);
+              boolean ping();
+          }
+          XEOF
+
+          cat > app/src/main/AndroidManifest.xml <<'XEOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+              <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
+              <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+              <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+
+              <application
+                  android:allowBackup="true"
+                  android:label="HUD Overlay"
+                  android:theme="@android:style/Theme.Material.NoActionBar">
+
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true"
+                      android:configChanges="orientation|screenSize|keyboardHidden">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+
+                  <service
+                      android:name=".HudService"
+                      android:exported="false"
+                      android:foregroundServiceType="mediaProjection|specialUse">
+                      <property
+                          android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                          android:value="overlay_hud" />
+                  </service>
+
+                  <service
+                      android:name=".InjectService"
+                      android:exported="false"
+                      android:process=":inject" />
+
+                  <service
+                      android:name=".AimAccessibility"
+                      android:exported="false"
+                      android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+                      <intent-filter>
+                          <action android:name="android.accessibilityservice.AccessibilityService" />
+                      </intent-filter>
+                      <meta-data
+                          android:name="android.accessibilityservice"
+                          android:resource="@xml/aim_service" />
+                  </service>
+
+                  <provider
+                      android:name="rikka.shizuku.ShizukuProvider"
+                      android:authorities="${applicationId}.shizuku"
+                      android:multiprocess="false"
+                      android:enabled="true"
+                      android:exported="true"
+                      android:permission="android.permission.INTERACT_ACROSS_USERS_FULL" />
+              </application>
+          </manifest>
+          XEOF
+
+          cat > app/src/main/res/xml/aim_service.xml <<'XEOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
+              android:accessibilityFeedbackType="feedbackGeneric"
+              android:notificationTimeout="50"
+              android:canPerformGestures="true"
+              android:canRetrieveWindowContent="false"
+              android:description="@string/aim_desc" />
+          XEOF
+
+          cat > app/src/main/res/values/strings.xml <<'XEOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources>
+              <string name="aim_desc">HUD का निशाना खींचने वाला हिस्सा</string>
+          </resources>
+          XEOF
+
+          cat > app/src/main/java/com/venice/hud/Config.kt <<'XEOF'
+          package com.venice.hud
+
+          import android.content.Context
+
+          data class Config(
+              var crosshair: Boolean = true,
+              var stats: Boolean = true,
+              var timer: Boolean = true,
+              var esp: Boolean = true,
+              var aimMode: Int = 0,
+              var autoFire: Boolean = false,
+              var fireBtn: Boolean = false,
+              var fx: Float = 0f,
+              var fy: Float = 0f,
+              var fov: Float = 16f,
+              var smooth: Int = 30,
+              var aimMs: Int = 50,
+              var headK: Int = 30,
+              var redThr: Int = 65,
+              var minBar: Int = 6,
+              var style: Int = 0,
+              var size: Float = 34f,
+              var thickness: Float = 3f,
+              var gap: Float = 14f,
+              var color: Int = 0xFF00E08A.toInt(),
+              var boxColor: Int = 0xFFFF3B30.toInt()
+          ) {
+              fun save(c: Context) {
+                  c.getSharedPreferences("cfg", 0).edit()
+                      .putBoolean("ch", crosshair).putBoolean("st", stats).putBoolean("tm", timer)
+                      .putBoolean("es", esp).putInt("am", aimMode).putBoolean("af", autoFire)
+                      .putBoolean("fb", fireBtn).putFloat("fx", fx).putFloat("fy", fy)
+                      .putFloat("fv", fov).putInt("sm", smooth).putInt("ams", aimMs)
+                      .putInt("hk", headK).putInt("rt", redThr).putInt("mb", minBar)
+                      .putInt("sty", style).putFloat("sz", size).putFloat("th", thickness)
+                      .putFloat("gp", gap).putInt("cl", color).putInt("bc", boxColor)
+                      .apply()
+              }
+
+              companion object {
+                  fun load(c: Context): Config {
+                      val p = c.getSharedPreferences("cfg", 0)
+                      val d = Config()
+                      return d.copy(
+                          crosshair = p.getBoolean("ch", d.crosshair),
+                          stats = p.getBoolean("st", d.stats),
+                          timer = p.getBoolean("tm", d.timer),
+                          esp = p.getBoolean("es", d.esp),
+                          aimMode = p.getInt("am", d.aimMode),
+                          autoFire = p.getBoolean("af", d.autoFire),
+                          fireBtn = p.getBoolean("fb", d.fireBtn),
+                          fx = p.getFloat("fx", d.fx),
+                          fy = p.getFloat("fy", d.fy),
+                          fov = p.getFloat("fv", d.fov),
+                          smooth = p.getInt("sm", d.smooth),
+                          aimMs = p.getInt("ams", d.aimMs),
+                          headK = p.getInt("hk", d.headK),
+                          redThr = p.getInt("rt", d.redThr),
+                          minBar = p.getInt("mb", d.minBar),
+                          style = p.getInt("sty", d.style),
+                          size = p.getFloat("sz", d.size),
+                          thickness = p.getFloat("th", d.thickness),
+                          gap = p.getFloat("gp", d.gap),
+                          color = p.getInt("cl", d.color),
+                          boxColor = p.getInt("bc", d.boxColor)
+                      )
+                  }
+              }
+          }
+          XEOF
+
+          cat > app/src/main/java/com/venice/hud/Sh.kt <<'XEOF'
+          package com.venice.hud
+
+          import rikka.shizuku.Shizuku
+
+          object Sh {
+              fun run(cmd: String): String {
+                  return try {
+                      val p = Shizuku.newProcess(arrayOf("sh", "-c", cmd), null, null) ?: return ""
+                      val out = p.inputStream.bufferedReader().readText()
+                      p.waitFor()
+                      out
+                  } catch (t: Throwable) { "" }
+              }
+          }
+          XEOF
+
+          cat > app/src/main/java/com/venice/hud/InjectService.kt <<'XEOF'
+          package com.venice.hud
+
+          import android.app.Service
+          import android.content.Intent
+          import android.os.IBinder
+          import android.os.SystemClock
+          import android.view.InputDevice
+          import android.view.InputEvent
+          import android.view.MotionEvent
+          import java.lang.reflect.Method
+          import kotlin.math.max
+
+          class InjectService : Service() {
+
+              private val im: Any? by lazy { resolveInputManager() }
+              private val injectM: Method? by lazy { resolveInject(im) }
+              @Volatile private var holding = false
+
+              private val binder = object : IInject.Stub() {
+
+                  override fun ping(): Boolean = injectM != null
+
+                  override fun tap(x: Float, y: Float): Boolean = swipe(x, y, x, y, 40)
+
+                  override fun swipe(x1: Float, y1: Float, x2: Float, y2: Float, ms: Int): Boolean {
+                      if (injectM == null) return false
+                      val dur = ms.coerceIn(20, 400)
+                      Thread {
+                          val down = SystemClock.uptimeMillis()
+                          send(down, down, MotionEvent.ACTION_DOWN, floatArrayOf(x1), floatArrayOf(y1), 1)
+                          val steps = max(3, dur / 8)
+                          for (i in 1..steps) {
+                              val t = i / steps.toFloat()
+                              send(down, SystemClock.uptimeMillis(), MotionEvent.ACTION_MOVE,
+                                  floatArrayOf(x1 + (x2 - x1) * t), floatArrayOf(y1 + (y2 - y1) * t), 1)
+                              sleep((dur / steps).toLong())
+                          }
+                          send(down, SystemClock.uptimeMillis(), MotionEvent.ACTION_UP, floatArrayOf(x2), floatArrayOf(y2), 1)
+                      }.start()
+                      return true
+                  }
+
+                  override fun fireDown(x: Float, y: Float): Boolean {
+                      if (injectM == null) return false
+                      if (holding) fireUp(x, y)
+                      val now = SystemClock.uptimeMillis()
+                      send(now, now, MotionEvent.ACTION_DOWN, floatArrayOf(x), floatArrayOf(y), 1)
+                      holding = true
+                      return true
+                  }
+
+                  override fun fireUp(x: Float, y: Float): Boolean {
+                      if (injectM == null) return false
+                      if (!holding) return true
+                      val now = SystemClock.uptimeMillis()
+                      send(now, now, MotionEvent.ACTION_UP, floatArrayOf(x), floatArrayOf(y), 1)
+                      holding = false
+                      return true
+                  }
+
+                  /** सिर पर स्नैप पूरा करो, फिर फायर दबाकर रखो */
+                  override fun snapHold(
+                      cx: Float, cy: Float, tx: Float, ty: Float, fx: Float, fy: Float, ms: Int
+                  ): Boolean {
+                      if (injectM == null) return false
+                      val dur = ms.coerceIn(20, 200)
+                      Thread {
+                          val down = SystemClock.uptimeMillis()
+                          send(down, down, MotionEvent.ACTION_DOWN, floatArrayOf(cx), floatArrayOf(cy), 1)
+                          val steps = max(3, dur / 6)
+                          for (i in 1..steps) {
+                              val t = i / steps.toFloat()
+                              send(down, SystemClock.uptimeMillis(), MotionEvent.ACTION_MOVE,
+                                  floatArrayOf(cx + (tx - cx) * t), floatArrayOf(cy + (ty - cy) * t), 1)
+                              sleep((dur / steps).toLong())
+                          }
+                          send(down, SystemClock.uptimeMillis(), MotionEvent.ACTION_UP, floatArrayOf(tx), floatArrayOf(ty), 1)
+                          sleep(12)
+                          fireDown(fx, fy)
+                      }.start()
+                      return true
+                  }
+              }
+
+              override fun onBind(i: Intent?): IBinder = binder
+
+              private fun sleep(ms: Long) {
+                  try { Thread.sleep(ms.coerceAtLeast(3)) } catch (e: Exception) {}
+              }
+
+              private fun send(down: Long, whenT: Long, action: Int, xs: FloatArray, ys: FloatArray, count: Int) {
+                  val m = injectM ?: return
+                  val i = im ?: return
+                  val props = Array(count) { MotionEvent.PointerProperties().apply { id = it; toolType = MotionEvent.TOOL_TYPE_FINGER } }
+                  val coords = Array(count) { MotionEvent.PointerCoords().apply { x = xs[it]; y = ys[it]; pressure = 1f; size = 1f } }
+                  val e = MotionEvent.obtain(down, whenT, action, count, props, coords, 0, 0, 1f, 1f, 0, 0,
+                      InputDevice.SOURCE_TOUCHSCREEN, 0)
+                  try { m.invoke(i, e, 0) } catch (t: Throwable) {}
+                  e.recycle()
+              }
+
+              private fun resolveInputManager(): Any? {
+                  return try {
+                      if (android.os.Build.VERSION.SDK_INT >= 34) {
+                          val c = Class.forName("android.hardware.input.InputManagerGlobal")
+                          c.getMethod("getInstance").invoke(null)
+                      } else {
+                          val c = Class.forName("android.hardware.input.InputManager")
+                          c.getMethod("getInstance").invoke(null)
+                      }
+                  } catch (t: Throwable) { null }
+              }
+
+              private fun resolveInject(target: Any?): Method? {
+                  if (target == null) return null
+                  return try {
+                      val m = target.javaClass.getMethod("injectInputEvent", InputEvent::class.java, Int::class.javaPrimitiveType)
+                      m.isAccessible = true
+                      m
+                  } catch (t: Throwable) { null }
+              }
+          }
+          XEOF
+
+          cat > app/src/main/java/com/venice/hud/ShizukuClient.kt <<'XEOF'
+          package com.venice.hud
+
+          import android.content.ComponentName
+          import android.content.Context
+          import android.content.ServiceConnection
+          import android.content.pm.PackageManager
+          import android.os.IBinder
+          import rikka.shizuku.Shizuku
+
+          object ShizukuClient {
+
+              @Volatile var inject: IInject? = null
+              val ready: Boolean get() = inject != null
+
+              private var conn: ServiceConnection? = null
+              private var args: Shizuku.UserServiceArgs? = null
+
+              fun usable(ctx: Context): Boolean {
+                  return try {
+                      Shizuku.pingBinder() &&
+                          !Shizuku.isPreV11() &&
+                          Shizuku.checkSelfPermission() == PackageManager.PERMISSION_GRANTED
+                  } catch (t: Throwable) { false }
+              }
+
+              fun connect(ctx: Context) {
+                  if (inject != null) return
+                  if (!usable(ctx)) return
+
+                  val a = Shizuku.UserServiceArgs(
+                      ComponentName(ctx.packageName, InjectService::class.java.name)
+                  ).daemon(false).processNameSuffix("inject").debuggable(false).version(4)
+
+                  val c = object : ServiceConnection {
+                      override fun onServiceConnected(n: ComponentName?, b: IBinder?) {
+                          inject = try { IInject.Stub.asInterface(b) } catch (t: Throwable) { null }
+                      }
+                      override fun onServiceDisconnected(n: ComponentName?) { inject = null }
+                  }
+                  args = a
+                  conn = c
+                  try { Shizuku.bindUserService(a, c) } catch (t: Throwable) { inject = null }
+              }
+
+              fun disconnect() {
+                  val c = conn ?: return
+                  val a = args
+                  try { if (a != null) Shizuku.unbindUserService(a, c, true) } catch (t: Throwable) {}
+                  conn = null
+                  inject = null
+              }
+          }
+          XEOF
+
+          cat > app/src/main/java/com/venice/hud/AimAccessibility.kt <<'XEOF'
+          package com.venice.hud
+
+          import android.accessibilityservice.AccessibilityService
+          import android.accessibilityservice.GestureDescription
+          import android.graphics.Path
+          import android.view.accessibility.AccessibilityEvent
+
+          class AimAccessibility : AccessibilityService() {
+
+              override fun onServiceConnected() {
+                  super.onServiceConnected()
+                  instance = this
+              }
+
+              override fun onAccessibilityEvent(e: AccessibilityEvent?) {}
+
+              override fun onInterrupt() {}
+
+              override fun onDestroy() {
+                  instance = null
+                  super.onDestroy()
+              }
+
+              fun swipe(x1: Float, y1: Float, x2: Float, y2: Float, ms: Long): Boolean {
+                  return try {
+                      val p = Path().apply { moveTo(x1, y1); lineTo(x2, y2) }
+                      val g = GestureDescription.Builder()
+                          .addStroke(GestureDescription.StrokeDescription(p, 0, ms.coerceAtLeast(20)))
+                          .build()
+                      dispatchGesture(g, null, null)
+                  } catch (e: Exception) { false }
+              }
+
+              companion object {
+                  @Volatile var instance: AimAccessibility? = null
+              }
+          }
+          XEOF
+
+          cat > app/src/main/java/com/venice/hud/Aimer.kt <<'XEOF'
+          package com.venice.hud
+
+          import android.os.SystemClock
+          import kotlin.math.abs
+          import kotlin.math.hypot
+
+          object Aimer {
+
+              private var lastAt = 0L
+              private const val MIN_GAP = 110L
+              private const val CAP = 300f
+              private const val DEAD = 3f
+              private const val BASE = 70f
+
+              val backend: String
+                  get() = if (ShizukuClient.ready) "Shizuku" else if (AimAccessibility.instance != null) "Accessibility" else "कोई नहीं"
+
+              /** गेन: smooth 0 = 1.43x, 30 = 1.0x, 70 = 0.43x */
+              private fun gain(smooth: Int) = (BASE + 30 - smooth.coerceIn(0, 95)) / BASE
+
+              private fun delta(from: Float, to: Float, g: Float) = ((to - from) * g).coerceIn(-CAP, CAP)
+
+              fun snap(cx: Float, cy: Float, tx: Float, ty: Float, c: Config, force: Boolean = false): Boolean {
+                  val now = SystemClock.uptimeMillis()
+                  if (!force && now - lastAt < MIN_GAP) return false
+
+                  val g = gain(c.smooth)
+                  val ddx = delta(cx, tx, g)
+                  val ddy = delta(cy, ty, g)
+                  if (abs(ddx) < DEAD && abs(ddy) < DEAD) return false
+
+                  val ms = c.aimMs.coerceIn(20, 400)
+                  val inj = ShizukuClient.inject
+                  val ok = try {
+                      if (inj != null) inj.swipe(cx, cy, cx + ddx, cy + ddy, ms)
+                      else AimAccessibility.instance?.swipe(cx, cy, cx + ddx, cy + ddy, ms.toLong()) ?: false
+                  } catch (t: Throwable) { false }
+
+                  if (ok) lastAt = now
+                  return ok
+              }
+
+              /** FIRE दबाने पर: सिर पर स्नैप पूरा करो, फिर फायर दबाकर रखो */
+              fun firePress(cx: Float, cy: Float, t: FloatArray?, c: Config) {
+                  val inj = ShizukuClient.inject
+                  if (inj == null) {
+                      if (t != null) AimAccessibility.instance?.swipe(cx, cy, t[0], t[1], c.aimMs.toLong())
+                      return
+                  }
+                  try {
+                      if (t == null) {
+                          inj.fireDown(c.fx, c.fy)
+                          return
+                      }
+                      val g = gain(c.smooth)
+                      inj.snapHold(cx, cy, cx + delta(cx, t[0], g), cy + delta(cy, t[1], g),
+                          c.fx, c.fy, c.aimMs.coerceIn(20, 200))
+                  } catch (th: Throwable) {}
+              }
+
+              fun fireRelease(c: Config) {
+                  try { ShizukuClient.inject?.fireUp(c.fx, c.fy) } catch (t: Throwable) {}
+              }
+
+              fun dist(ax: Float, ay: Float, bx: Float, by: Float): Float =
+                  hypot((ax - bx).toDouble(), (ay - by).toDouble()).toFloat()
+          }
+          XEOF
+
+          cat > app/src/main/java/com/venice/hud/Detector.kt <<'XEOF'
+          package com.venice.hud
+
+          import java.nio.ByteBuffer
+
+          object Detector {
+
+              class Blob(var x0: Int, var x1: Int, var y0: Int, var y1: Int, var lastRow: Int)
+
+              fun scan(
+                  buf: ByteBuffer, w: Int, h: Int, rowStride: Int, ps: Int,
+                  redThr: Int, minBar: Int
+              ): List<Blob> {
+
+                  val yStart = (h * 0.06f).toInt()
+                  val yEnd = (h * 0.80f).toInt()
+                  if (yEnd <= yStart) return emptyList()
+
+                  val active = ArrayList<Blob>()
+                  val done = ArrayList<Blob>()
+
+                  for (y in yStart until yEnd) {
+                      val base = y * rowStride
+                      var x = 0
+                      val segs = ArrayList<IntArray>()
+
+                      while (x < w) {
+                          var i = base + x * ps
+                          if (!isRed(buf.get(i), buf.get(i + 1), buf.get(i + 2), redThr)) { x++; continue }
+                          val sx = x
+                          while (x < w) {
+                              i = base + x * ps
+                              if (!isRed(buf.get(i), buf.get(i + 1), buf.get(i + 2), redThr)) break
+                              x++
+                          }
+                          if (x - sx >= minBar) segs.add(intArrayOf(sx, x - 1))
+                      }
+
+                      for (s in segs) {
+                          var hit: Blob? = null
+                          for (b in active) {
+                              if (s[0] <= b.x1 + 1 && s[1] >= b.x0 - 1) { hit = b; break }
+                          }
+                          if (hit != null) {
+                              if (s[0] < hit.x0) hit.x0 = s[0]
+                              if (s[1] > hit.x1) hit.x1 = s[1]
+                              hit.y1 = y
+                              hit.lastRow = y
+                          } else {
+                              active.add(Blob(s[0], s[1], y, y, y))
+                          }
+                      }
+
+                      val it = active.iterator()
+                      while (it.hasNext()) {
+                          val b = it.next()
+                          if (y - b.lastRow > 2) { done.add(b); it.remove() }
+                      }
+                  }
+                  done.addAll(active)
+
+                  val out = ArrayList<Blob>()
+                  for (b in done) {
+                      val bw = b.x1 - b.x0 + 1
+                      val bh = b.y1 - b.y0 + 1
+                      if (bw < minBar) continue
+                      if (bh > minBar + 2) continue
+                      if (bw.toFloat() / bh.toFloat() < 2.2f) continue
+                      out.add(b)
+                  }
+                  return out
+              }
+
+              private fun isRed(rb: Byte, gb: Byte, bb: Byte, thr: Int): Boolean {
+                  val r = rb.toInt() and 0xFF
+                  val g = gb.toInt() and 0xFF
+                  val b = bb.toInt() and 0xFF
+                  return r >= 115 && (r - g) >= thr && (r - b) >= thr && g <= 145
+              }
+          }
+          XEOF
+
+          cat > app/src/main/java/com/venice/hud/CaptureManager.kt <<'XEOF'
+          package com.venice.hud
+
+          import android.content.Context
+          import android.content.Intent
+          import android.graphics.PixelFormat
+          import android.hardware.display.DisplayManager
+          import android.hardware.display.VirtualDisplay
+          import android.media.ImageReader
+          import android.media.projection.MediaProjection
+          import android.media.projection.MediaProjectionManager
+          import android.os.Handler
+          import android.os.HandlerThread
+          import android.util.DisplayMetrics
+          import android.view.WindowManager
+          import java.nio.ByteBuffer
+
+          class CaptureManager(private val ctx: Context, private val cb: Callback) {
+
+              interface Callback {
+                  fun onProjectionReady()
+                  fun onFrame(buf: ByteBuffer, w: Int, h: Int, rowStride: Int, ps: Int)
+                  fun onScale(scale: Int)
+              }
+
+              val scale = 4
+
+              private val thread = HandlerThread("hudcap").apply { start() }
+              private val h = Handler(thread.looper)
+              private val dm = ctx.getSystemService(Context.DISPLAY_SERVICE) as DisplayManager
+              private val wm = ctx.getSystemService(Context.WINDOW_SERVICE) as WindowManager
+
+              private var projection: MediaProjection? = null
+              private var vd: VirtualDisplay? = null
+              private var reader: ImageReader? = null
+              private var live = false
+
+              private val displayListener = object : DisplayManager.DisplayListener {
+                  override fun onDisplayAdded(id: Int) {}
+                  override fun onDisplayRemoved(id: Int) {}
+                  override fun onDisplayChanged(id: Int) { h.post { if (live) rebuild() } }
+              }
+
+              fun start(resultCode: Int, data: Intent) {
+                  val mpm = ctx.getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
+                  val p = mpm.getMediaProjection(resultCode, data) ?: return
+                  projection = p
+                  p.registerCallback(object : MediaProjection.Callback() {
+                      override fun onStop() { stop() }
+                  }, h)
+                  cb.onProjectionReady()
+                  live = true
+                  dm.registerDisplayListener(displayListener, h)
+                  rebuild()
+              }
+
+              private fun size(): Pair<Int, Int> {
+                  val m = DisplayMetrics()
+                  @Suppress("DEPRECATION")
+                  wm.defaultDisplay.getRealMetrics(m)
+                  return m.widthPixels to m.heightPixels
+              }
+
+              private fun rebuild() {
+                  release()
+                  val (dw, dh) = size()
+                  val w = (dw / scale).coerceAtLeast(8)
+                  val hh = (dh / scale).coerceAtLeast(8)
+                  val r = ImageReader.newInstance(w, hh, PixelFormat.RGBA_8888, 2)
+                  r.setOnImageAvailableListener({ ir ->
+                      val img = try { ir.acquireLatestImage() } catch (e: Exception) { null } ?: return@setOnImageAvailableListener
+                      try {
+                          val pl = img.planes[0]
+                          cb.onFrame(pl.buffer, w, hh, pl.rowStride, pl.pixelStride)
+                      } catch (e: Exception) {
+                      } finally {
+                          img.close()
+                      }
+                  }, h)
+                  reader = r
+                  vd = projection?.createVirtualDisplay(
+                      "hud", w, hh, ctx.resources.displayMetrics.densityDpi,
+                      DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR, r.surface, null, h
+                  )
+                  cb.onScale(scale)
+              }
+
+              private fun release() {
+                  try { vd?.release() } catch (e: Exception) {}
+                  try { reader?.close() } catch (e: Exception) {}
+                  vd = null
+                  reader = null
+              }
+
+              fun stop() {
+                  if (!live && projection == null) return
+                  live = false
+                  try { dm.unregisterDisplayListener(displayListener) } catch (e: Exception) {}
+                  release()
+                  try { projection?.stop() } catch (e: Exception) {}
+                  projection = null
+                  thread.quitSafely()
+              }
+          }
+          XEOF
+
+          cat > app/src/main/java/com/venice/hud/EspView.kt <<'XEOF'
+          package com.venice.hud
+
+          import android.content.Context
+          import android.graphics.Canvas
+          import android.graphics.Paint
+          import android.view.View
+
+          class EspView(c: Context) : View(c) {
+
+              @Volatile var targets: List<FloatArray> = emptyList()
+              @Volatile var boxColor: Int = 0xFFFF3B30.toInt()
+              @Volatile var fovRadius: Float = 0f
+              @Volatile var showFov: Boolean = false
+
+              private val p = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE }
+
+              override fun onDraw(canvas: Canvas) {
+                  val list = targets
+                  val d = resources.displayMetrics.density
+
+                  if (showFov && fovRadius > 0f) {
+                      p.color = 0x66FFFFFF
+                      p.strokeWidth = 1.5f * d
+                      p.style = Paint.Style.STROKE
+                      canvas.drawCircle(width / 2f, height / 2f, fovRadius, p)
+                  }
+
+                  if (list.isEmpty()) return
+
+                  p.color = boxColor
+                  p.strokeWidth = 1.6f * d
+                  p.style = Paint.Style.STROKE
+
+                  for (t in list) {
+                      val x = t[0]
+                      val y = t[1]
+                      val bw = t[2]
+                      val half = bw * 0.45f
+                      canvas.drawRect(x - half, y - bw * 0.30f, x + half, y + bw * 0.95f, p)
+
+                      p.style = Paint.Style.FILL
+                      canvas.drawCircle(x, y, 2.4f * d, p)
+                      p.style = Paint.Style.STROKE
+                  }
+              }
+          }
+          XEOF
+
+          cat > app/src/main/java/com/venice/hud/MainActivity.kt <<'XEOF'
+          package com.venice.hud
+
+          import android.app.Activity
+          import android.content.Intent
+          import android.content.pm.PackageManager
+          import android.media.projection.MediaProjectionManager
+          import android.net.Uri
+          import android.os.Build
+          import android.os.Bundle
+          import android.provider.Settings
+          import android.view.ViewGroup
+          import android.widget.Button
+          import android.widget.LinearLayout
+          import android.widget.ScrollView
+          import android.widget.TextView
+          import android.widget.Toast
+          import rikka.shizuku.Shizuku
+
+          class MainActivity : Activity() {
+
+              private lateinit var info: TextView
+              private val REQ_CAP = 1001
+              private val REQ_SHIZUKU = 2002
+
+              private val permListener = Shizuku.OnRequestPermissionResultListener { code, res ->
+                  if (code == REQ_SHIZUKU) {
+                      if (res == PackageManager.PERMISSION_GRANTED) {
+                          ShizukuClient.connect(this)
+                          Toast.makeText(this, "Shizuku मिल गया", Toast.LENGTH_SHORT).show()
+                      } else {
+                          Toast.makeText(this, "Shizuku परमिशन नहीं मिली", Toast.LENGTH_SHORT).show()
+                      }
+                      refresh()
+                  }
+              }
+
+              override fun onCreate(s: Bundle?) {
+                  super.onCreate(s)
+                  Shizuku.addRequestPermissionResultListener(permListener)
+
+                  val scroll = ScrollView(this)
+                  val root = LinearLayout(this).apply {
+                      orientation = LinearLayout.VERTICAL
+                      setPadding(52, 84, 52, 60)
+                      setBackgroundColor(0xFF0E1216.toInt())
+                  }
+                  scroll.addView(root)
+
+                  root.addView(TextView(this).apply {
+                      text = "HUD + ESP + AIM  v4"
+                      setTextColor(0xFF00E08A.toInt())
+                      textSize = 26f
+                      setTypeface(null, 1)
+                  })
+
+                  root.addView(TextView(this).apply {
+                      text = "FIRE बटन दबाने पर क्रॉसहेयर दुश्मन के सिर पर जाता है और गोली चलती है। स्नैप पहले, फायर बाद में — इसलिए पहली गोली ही सिर पर। कोई रूट नहीं, कोई injection नहीं।"
+                      setTextColor(0xFF8BA0AD.toInt())
+                      textSize = 13f
+                      setPadding(0, 16, 0, 24)
+                  })
+
+                  info = TextView(this).apply {
+                      setTextColor(0xFFCFD8DC.toInt())
+                      textSize = 14f
+                      setPadding(0, 0, 0, 24)
+                  }
+                  root.addView(info)
+
+                  root.addView(btn("0. Shizuku परमिशन + ऑटो सेटअप") { shizukuSetup() })
+
+                  root.addView(btn("1. Overlay परमिशन") {
+                      startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName")))
+                  })
+
+                  if (Build.VERSION.SDK_INT >= 33) {
+                      root.addView(btn("2. Notification परमिशन") {
+                          requestPermissions(arrayOf("android.permission.POST_NOTIFICATIONS"), 1)
+                      })
+                  }
+
+                  root.addView(btn("3. Accessibility (बैकअप, वैकल्पिक)") {
+                      startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+                  })
+
+                  root.addView(btn("4. Battery optimization बंद") {
+                      try {
+                          startActivity(Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:$packageName")))
+                      } catch (e: Exception) {
+                          startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS))
+                      }
+                  })
+
+                  root.addView(btn("5. Screen capture + START HUD") {
+                      if (!Settings.canDrawOverlays(this)) {
+                          Toast.makeText(this, "पहले overlay परमिशन दो", Toast.LENGTH_SHORT).show()
+                          return@btn
+                      }
+                      val mpm = getSystemService(MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
+                      startActivityForResult(mpm.createScreenCaptureIntent(), REQ_CAP)
+                  })
+
+                  root.addView(btn("STOP") {
+                      stopService(Intent(this, HudService::class.java))
+                      Toast.makeText(this, "बंद", Toast.LENGTH_SHORT).show()
+                  })
+
+                  setContentView(scroll)
+              }
+
+              private fun shizukuSetup() {
+                  if (!Shizuku.pingBinder()) {
+                      Toast.makeText(this, "Shizuku चालू नहीं है — Shizuku ऐप खोलकर स्टार्ट करो", Toast.LENGTH_LONG).show()
+                      return
+                  }
+                  if (Shizuku.isPreV11()) {
+                      Toast.makeText(this, "Shizuku पुराना है, v13 लगाओ", Toast.LENGTH_LONG).show()
+                      return
+                  }
+                  if (Shizuku.checkSelfPermission() == PackageManager.PERMISSION_GRANTED) {
+                      grantAll()
+                  } else {
+                      Shizuku.requestPermission(REQ_SHIZUKU)
+                  }
+              }
+
+              private fun grantAll() {
+                  Thread {
+                      Sh.run("appops set $packageName SYSTEM_ALERT_WINDOW allow")
+                      Sh.run("pm grant $packageName android.permission.POST_NOTIFICATIONS")
+                      Sh.run("dumpsys deviceidle whitelist +$packageName")
+                      runOnUiThread {
+                          Toast.makeText(this, "परमिशन सेट हो गईं", Toast.LENGTH_SHORT).show()
+                          refresh()
+                      }
+                  }.start()
+              }
+
+              override fun onResume() {
+                  super.onResume()
+                  refresh()
+              }
+
+              private fun refresh() {
+                  val shiz = when {
+                      !Shizuku.pingBinder() -> "Shizuku चालू नहीं"
+                      Shizuku.checkSelfPermission() == PackageManager.PERMISSION_GRANTED -> "मिल गई"
+                      else -> "नहीं मिली"
+                  }
+                  info.text =
+                      "Overlay: ${if (Settings.canDrawOverlays(this)) "मिल गई" else "नहीं मिली"}\n" +
+                      "Shizuku: $shiz\n" +
+                      "इंजेक्टर: ${if (ShizukuClient.ready) "तैयार" else "नहीं"}\n" +
+                      "HUD: ${if (HudService.running) "चालू है" else "बंद है"}"
+              }
+
+              override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+                  super.onActivityResult(requestCode, resultCode, data)
+                  if (requestCode != REQ_CAP) return
+                  if (resultCode != Activity.RESULT_OK || data == null) {
+                      Toast.makeText(this, "capture परमिशन नहीं मिली", Toast.LENGTH_SHORT).show()
+                      return
+                  }
+                  val i = Intent(this, HudService::class.java)
+                      .putExtra("code", resultCode)
+                      .putExtra("data", data)
+                  if (Build.VERSION.SDK_INT >= 26) startForegroundService(i) else startService(i)
+                  Toast.makeText(this, "HUD चालू — Free Fire खोलो", Toast.LENGTH_SHORT).show()
+              }
